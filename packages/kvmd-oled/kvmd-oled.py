@@ -31,6 +31,8 @@ from typing import Tuple
 
 import netifaces
 import psutil
+import urllib.request
+import ipaddress
 
 from luma.core import cmdline as luma_cmdline
 from luma.core.device import device as luma_device
@@ -45,26 +47,27 @@ _logger = logging.getLogger("oled")
 
 
 # =====
-def _get_ip() -> Tuple[str, str]:
-    try:
-        gws = netifaces.gateways()
-        if "default" not in gws:
-            raise RuntimeError(f"No default gateway: {gws}")
+def _get_ip(iface) -> str:
+    iface_addrs = netifaces.ifaddresses(iface)
+    all_ips = []
+    for ip in iface_addrs[netifaces.AF_INET]:
+        all_ips.append(ip['addr'])
 
-        iface = ""
-        for proto in [socket.AF_INET, socket.AF_INET6]:
-            if proto in gws["default"]:
-                iface = gws["default"][proto][1]
-                break
-        else:
-            raise RuntimeError(f"No iface for the gateway {gws['default']}")
+    return(all_ips)
 
-        for addr in netifaces.ifaddresses(iface).get(proto, []):
-            return (iface, addr["addr"])
-    except Exception:
-        # _logger.exception("Can't get iface/IP")
-        return ("<no-iface>", "<no-ip>")
+def _get_ip6(iface) -> str:
+    iface_addrs = netifaces.ifaddresses(iface)
+    all_ip6s = []
+    for ip6 in iface_addrs[netifaces.AF_INET6]:
+        address = ipaddress.ip_address(ip6['addr'].split("%")[0])
+        all_ip6s.append(address.exploded)
 
+    return(all_ip6s)
+
+def _get_external_ip() -> str:
+    external_ip = urllib.request.urlopen('https://ident.me').read().decode('utf8')
+
+    return(external_ip)
 
 def _get_uptime() -> str:
     uptime = datetime.timedelta(seconds=int(time.time() - psutil.boot_time()))
@@ -147,6 +150,7 @@ def main() -> None:
     parser.add_argument("--pipe", action="store_true", help="Read and display lines from stdin until EOF, wait a single interval and exit")
     parser.add_argument("--clear-on-exit", action="store_true", help="Clear display on exit")
     parser.add_argument("--contrast", default=None, type=int, help="Set OLED contrast, values from 0 to 255")
+    parser.add_argument("--allipv6", action="store_true", help="Include Local-Link IPv6 addresses(fe80::)")
     options = parser.parse_args(sys.argv[1:])
     if options.config:
         config = luma_cmdline.load_config(options.config)
@@ -190,14 +194,32 @@ def main() -> None:
             time.sleep(options.interval)
 
         else:
-            summary = True
             while True:
-                if summary:
-                    text = f"{socket.getfqdn()}\nup: {_get_uptime()}\ntemp: {_get_temp()}"
-                else:
-                    text = "iface: %s\n~ %s\ncpu: %s mem: %s" % (*_get_ip(), _get_cpu(), _get_mem())
+                text = f"{socket.getfqdn()}\nup: {_get_uptime()}\ntemp: {_get_temp()}"
                 screen.draw_text(text)
-                summary = (not summary)
+                time.sleep(max(options.interval, 1))
+
+                text = f"cpu: {_get_cpu()}\nmem: {_get_mem()}"
+                screen.draw_text(text)
+                time.sleep(max(options.interval, 1))
+
+                for interface in netifaces.interfaces():
+                    if interface != 'lo':
+                        for address in _get_ip(interface):
+                            text = "iface: %s\n~ %s\n" % (interface, address)
+                            screen.draw_text(text)
+                            time.sleep(max(options.interval, 1))
+                        for address6 in _get_ip6(interface):
+                            if not options.allipv6 and address6.startswith('fe80'):
+                                continue
+                            segments=address6.split(":")
+                            for number, segment in enumerate(segments):
+                                text = "iface6: %s\nSegment %s: %s" % (interface, number, segment)
+                                screen.draw_text(text)
+                                time.sleep(max(options.interval, 1))
+
+                text = f"external address:\n{_get_external_ip()}"
+                screen.draw_text(text)
                 time.sleep(max(options.interval, 1))
     except (SystemExit, KeyboardInterrupt):
         pass
